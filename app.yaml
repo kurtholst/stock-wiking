@@ -1,0 +1,19 @@
+command:
+  - "python"
+  - "-m"
+  - "uvicorn"
+  - "app:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+
+resources:
+  - name: serving-endpoint
+    serving_endpoint:
+      name: databricks-gpt-5-2
+      permission: CAN_QUERY
+  - name: sql-warehouse
+    sql_warehouse:
+      name: Serverless Starter Warehouse
+      permission: CAN_USE
