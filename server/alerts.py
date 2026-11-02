@@ -91,8 +91,9 @@ def deep_alerts(deep) -> list[Alert]:
     alerts: list[Alert] = []
     for c in deep.companies:
         t = c.thesis
-        if (t and c.alpha_score >= CRIT_DEEP_SCORE_MIN and t.conviction >= CRIT_DEEP_CONVICTION_MIN
-                and t.priced_in == "LOW"):
+        # conviction on a NOISE thesis means "confident it's noise" - never alert on that
+        if (t and t.move_type != "NOISE" and c.alpha_score >= CRIT_DEEP_SCORE_MIN
+                and t.conviction >= CRIT_DEEP_CONVICTION_MIN and t.priced_in == "LOW"):
             alerts.append(Alert(
                 key=f"deep:{c.ticker}:{t.move_type}",
                 level="critical",

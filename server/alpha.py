@@ -341,7 +341,7 @@ def _gemini_json(model: str, system: str, user: str, schema: dict, thinking_budg
 
 def _call_ai(system: str, user: str, schema: dict, warnings: list[str]) -> tuple[dict | None, str]:
     """Try the deep model first, fall back to the regular one."""
-    deep = os.environ.get("GEMINI_DEEP_MODEL", "gemini-2.5-pro")
+    deep = os.environ.get("GEMINI_DEEP_MODEL", "gemini-pro-latest")
     fallback = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     for model, budget in ((deep, 16384), (fallback, 8192)):
         for attempt in range(2):
@@ -457,7 +457,7 @@ def run_deep_analysis(quarters: int = 8, trigger: str = "manual", progress=None)
             progress(i, total_steps, msg)
 
     companies: list[DeepCompany] = []
-    model = os.environ.get("GEMINI_DEEP_MODEL", "gemini-2.5-pro")
+    model = os.environ.get("GEMINI_DEEP_MODEL", "gemini-pro-latest")
 
     def publish(phase: str, memo: str = "") -> None:
         """Write the results so far, so the UI can show them while the run continues."""
