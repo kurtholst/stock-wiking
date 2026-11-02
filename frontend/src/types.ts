@@ -58,6 +58,7 @@ export interface TechnicalsResponse {
 export interface RankRow {
   ticker: string;
   price: number;
+  pe_ratio: number | null;
   change_1d: number | null;
   change_1w: number | null;
   change_1m: number | null;
@@ -70,6 +71,8 @@ export interface RankRow {
   ma200_dist: number | null;
   vol_ratio: number | null;
   atr14: number | null;
+  signal: string | null;
+  signal_reason: string | null;
 }
 
 export interface ChatMessage {
@@ -79,5 +82,143 @@ export interface ChatMessage {
 
 export interface ChatResponseData {
   reply: string;
+  model: string;
+}
+
+// Patent AI tab types (per-ticker patent search)
+
+export interface PatentResult {
+  patent_number: string;
+  title: string;
+  applicant: string;
+  filing_date: string | null;
+  status: string | null;
+}
+
+export interface PatentScore {
+  patent_number: string;
+  title: string;
+  score: 'POSITIVE' | 'INSIGNIFICANT' | 'NEGATIVE';
+  reasoning: string;
+}
+
+export interface PatentSearchResponse {
+  ticker: string;
+  company_name: string;
+  patents: PatentResult[];
+  total_found: number;
+  source: string;
+  error: string | null;
+}
+
+export interface PatentAnalyzeRequest {
+  ticker: string;
+  company_name: string;
+  patents: PatentResult[];
+}
+
+export interface PatentAnalyzeResponse {
+  ticker: string;
+  company_name: string;
+  scores: PatentScore[];
+  summary: string;
+  model: string;
+}
+
+// Patent discovery types (Company Search tab)
+
+export interface DiscoverPatentResult {
+  title: string;
+  patent_number: string;
+  date: string | null;
+  applicant: string;
+}
+
+export interface DiscoverRequest {
+  query: string;
+  ipc?: string;
+  date_from?: string;
+  date_to?: string;
+}
+
+export interface CompanyPatents {
+  company: string;
+  patent_count: number;
+  sample_patents: DiscoverPatentResult[];
+}
+
+export interface DiscoverResponse {
+  query: string;
+  companies: CompanyPatents[];
+  total_patents: number;
+  source: string;
+  error: string | null;
+}
+
+export interface CompanyRanking {
+  company: string;
+  score: string;
+  reasoning: string;
+  patent_count: number;
+}
+
+export interface DiscoverAnalyzeRequest {
+  query: string;
+  companies: CompanyPatents[];
+}
+
+export interface DiscoverAnalyzeResponse {
+  query: string;
+  rankings: CompanyRanking[];
+  summary: string;
+  model: string;
+}
+
+// DKPTO (Danish patent search) types
+
+export interface DkptoSearchRequest {
+  applicant?: string;
+  title?: string;
+  ipc?: string;
+  date_from?: string;
+  date_to?: string;
+}
+
+export interface DkptoSearchResponse {
+  patents: DiscoverPatentResult[];
+  total_found: number;
+  source: string;
+  error: string | null;
+}
+
+// Stars (Danish patent screener) types
+
+export interface StarsPatentHit {
+  patent_number: string;
+  title: string;
+  applicant: string;
+  filing_date: string | null;
+  publication_date: string | null;
+}
+
+export interface CompanyStarsResult {
+  name: string;
+  ticker: string;
+  sector: string;
+  patent_count: number;
+  recent_patents: StarsPatentHit[];
+  stars: number | null;
+  ai_signal: string | null;
+  ai_summary: string | null;
+  stock_price: number | null;
+  stock_change_pct: number | null;
+}
+
+export interface StarsScanResponse {
+  scan_date: string;
+  period_days: number;
+  companies: CompanyStarsResult[];
+  total_patents: number;
+  summary: string;
   model: string;
 }

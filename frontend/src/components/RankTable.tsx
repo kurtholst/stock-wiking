@@ -1,26 +1,28 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowDown, ArrowUp, ArrowUpDown, Loader2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, ArrowUpDown, Info, Loader2 } from 'lucide-react';
 import type { RankRow } from '../types';
 import { fetchRank } from '../api';
 import { formatPrice, formatPct, getTickerColor } from '../utils';
 
 type SortKey = keyof RankRow;
 
-const COLUMNS: { key: SortKey; label: string }[] = [
-  { key: 'ticker', label: 'Ticker' },
-  { key: 'price', label: 'Price' },
-  { key: 'change_1d', label: '1D %' },
-  { key: 'change_1w', label: '1W %' },
-  { key: 'change_1m', label: '1M %' },
-  { key: 'change_3m', label: '3M %' },
-  { key: 'rsi14', label: 'RSI 14' },
-  { key: 'macd_hist', label: 'MACD Hist' },
-  { key: 'bb_pct', label: 'BB %B' },
-  { key: 'ma20_dist', label: 'MA 20 %' },
-  { key: 'ma50_dist', label: 'MA 50 %' },
-  { key: 'ma200_dist', label: 'MA 200 %' },
-  { key: 'vol_ratio', label: 'Vol Ratio' },
-  { key: 'atr14', label: 'ATR 14' },
+const COLUMNS: { key: SortKey; label: string; tip: string }[] = [
+  { key: 'ticker', label: 'Ticker', tip: 'Stock ticker symbol' },
+  { key: 'signal', label: 'Signal', tip: 'Composite Buy/Hold/Sell signal derived from RSI, MACD, Bollinger Bands, moving averages, and momentum' },
+  { key: 'price', label: 'Price', tip: 'Latest closing price' },
+  { key: 'pe_ratio', label: 'P/E', tip: 'Price-to-Earnings ratio (trailing). Lower = cheaper relative to earnings. Negative = company is unprofitable' },
+  { key: 'change_1d', label: '1D %', tip: 'Price change over the last trading day' },
+  { key: 'change_1w', label: '1W %', tip: 'Price change over the last week' },
+  { key: 'change_1m', label: '1M %', tip: 'Price change over the last month' },
+  { key: 'change_3m', label: '3M %', tip: 'Price change over the last 3 months' },
+  { key: 'rsi14', label: 'RSI 14', tip: 'Relative Strength Index (14-day). Above 70 = overbought, below 30 = oversold' },
+  { key: 'macd_hist', label: 'MACD Hist', tip: 'MACD histogram - difference between MACD and signal line. Positive = bullish momentum' },
+  { key: 'bb_pct', label: 'BB %B', tip: 'Bollinger Band %B - position within bands. Above 100% = above upper band, below 0% = below lower band' },
+  { key: 'ma20_dist', label: 'MA 20 %', tip: 'Distance from 20-day moving average. Positive = price above MA' },
+  { key: 'ma50_dist', label: 'MA 50 %', tip: 'Distance from 50-day moving average. Positive = price above MA' },
+  { key: 'ma200_dist', label: 'MA 200 %', tip: 'Distance from 200-day moving average. Positive = price above MA' },
+  { key: 'vol_ratio', label: 'Vol Ratio', tip: 'Volume ratio vs 20-day average. Above 1.5x = unusually high volume' },
+  { key: 'atr14', label: 'ATR 14', tip: 'Average True Range (14-day) - measures daily price volatility' },
 ];
 
 interface Props {
@@ -101,8 +103,33 @@ export function RankTable({ tickers }: Props) {
             <span className="font-medium text-gray-800">{row.ticker}</span>
           </div>
         );
+      case 'signal': {
+        if (v == null) return <span className="text-gray-300">--</span>;
+        const sig = v as string;
+        const sigClass = sig === 'Buy'
+          ? 'bg-green-100 text-green-700'
+          : sig === 'Sell'
+            ? 'bg-red-100 text-red-700'
+            : 'bg-gray-100 text-gray-600';
+        const reason = row.signal_reason;
+        return (
+          <div className="relative group/sig inline-block">
+            <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold cursor-help ${sigClass}`}>{sig}</span>
+            {reason && (
+              <div className="absolute left-0 bottom-full mb-1 z-50 hidden group-hover/sig:block pointer-events-none">
+                <div className="bg-gray-800 text-white text-[11px] font-normal leading-snug rounded-lg px-3 py-2.5 shadow-lg whitespace-pre-line w-80">
+                  {reason}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      }
       case 'price':
         return <span className="font-medium text-gray-900 tabular-nums">{formatPrice(v as number)}</span>;
+      case 'pe_ratio':
+        if (v == null) return <span className="text-gray-300">--</span>;
+        return <span className={`tabular-nums ${(v as number) < 0 ? 'text-red-500' : (v as number) > 40 ? 'text-amber-600' : 'text-gray-700'}`}>{(v as number).toFixed(1)}</span>;
       case 'change_1d':
       case 'change_1w':
       case 'change_1m':
@@ -160,14 +187,23 @@ export function RankTable({ tickers }: Props) {
             <table className="w-full text-sm">
               <thead className="bg-gray-50 sticky top-0">
                 <tr>
-                  {COLUMNS.map(({ key, label }) => (
+                  {COLUMNS.map(({ key, label, tip }) => (
                     <th
                       key={key}
                       onClick={() => handleSort(key)}
                       className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-700 select-none whitespace-nowrap"
                     >
-                      <div className="flex items-center gap-1">
-                        {label} <SortIcon col={key} />
+                      <div className="relative group flex items-center gap-1">
+                        {label}
+                        {key !== 'ticker' && (
+                          <Info size={10} className="text-gray-300 group-hover:text-blue-400 transition-colors shrink-0" />
+                        )}
+                        <SortIcon col={key} />
+                        <div className="absolute left-0 top-full mt-1 z-50 hidden group-hover:block pointer-events-none">
+                          <div className="bg-gray-800 text-white text-[11px] font-normal normal-case tracking-normal leading-snug rounded-lg px-3 py-2 shadow-lg whitespace-normal w-52">
+                            {tip}
+                          </div>
+                        </div>
                       </div>
                     </th>
                   ))}

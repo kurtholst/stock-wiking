@@ -10,4 +10,5 @@ dependencies = [
     "pandas",
     "yfinance",
     "pyyaml",
+    "httpx",
 ]

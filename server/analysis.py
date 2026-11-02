@@ -91,6 +91,7 @@ class RankRequest(BaseModel):
 class RankRow(BaseModel):
     ticker: str
     price: float
+    pe_ratio: float | None = None
     change_1d: float | None = None
     change_1w: float | None = None
     change_1m: float | None = None
@@ -103,6 +104,8 @@ class RankRow(BaseModel):
     ma200_dist: float | None = None
     vol_ratio: float | None = None
     atr14: float | None = None
+    signal: str | None = None
+    signal_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -340,9 +343,147 @@ def get_technicals(request: TechnicalsRequest) -> TechnicalsResponse:
 # Rank (one-row-per-ticker snapshot)
 # ---------------------------------------------------------------------------
 
+def _compute_signal(
+    rsi14: float | None,
+    macd_hist_val: float | None,
+    bb_pct: float | None,
+    ma20_dist: float | None,
+    ma50_dist: float | None,
+    change_1m: float | None,
+) -> tuple[str, str]:
+    """Derive a Buy/Hold/Sell signal from technical indicators.
+
+    Scoring: each indicator contributes +1 (bullish), 0 (neutral), or -1
+    (bearish).  Total >= 2 -> Buy, <= -2 -> Sell, otherwise Hold.
+    Returns (signal, reason) tuple.
+    """
+    score = 0
+    bullish: list[str] = []
+    bearish: list[str] = []
+
+    if rsi14 is not None:
+        if rsi14 <= 35:
+            score += 1
+            bullish.append(f"RSI oversold ({rsi14:.0f})")
+        elif rsi14 >= 65:
+            score -= 1
+            bearish.append(f"RSI overbought ({rsi14:.0f})")
+
+    if macd_hist_val is not None:
+        if macd_hist_val > 0:
+            score += 1
+            bullish.append("MACD bullish")
+        elif macd_hist_val < 0:
+            score -= 1
+            bearish.append("MACD bearish")
+
+    if bb_pct is not None:
+        if bb_pct <= 20:
+            score += 1
+            bullish.append(f"Near lower Bollinger Band ({bb_pct:.0f}%)")
+        elif bb_pct >= 80:
+            score -= 1
+            bearish.append(f"Near upper Bollinger Band ({bb_pct:.0f}%)")
+
+    if ma20_dist is not None:
+        if ma20_dist > 1:
+            score += 1
+            bullish.append(f"Above MA20 ({ma20_dist:+.1f}%)")
+        elif ma20_dist < -1:
+            score -= 1
+            bearish.append(f"Below MA20 ({ma20_dist:+.1f}%)")
+
+    if ma50_dist is not None:
+        if ma50_dist > 0:
+            score += 1
+            bullish.append(f"Above MA50 ({ma50_dist:+.1f}%)")
+        elif ma50_dist < -2:
+            score -= 1
+            bearish.append(f"Below MA50 ({ma50_dist:+.1f}%)")
+
+    if change_1m is not None:
+        if change_1m > 5:
+            score += 1
+            bullish.append(f"Strong 1M momentum ({change_1m:+.1f}%)")
+        elif change_1m < -5:
+            score -= 1
+            bearish.append(f"Weak 1M momentum ({change_1m:+.1f}%)")
+
+    if score >= 2:
+        signal = "Buy"
+    elif score <= -2:
+        signal = "Sell"
+    else:
+        signal = "Hold"
+
+    # Build a 3-line analyst-style summary
+    lines: list[str] = []
+
+    # Line 1: headline with score context
+    bull_count = len(bullish)
+    bear_count = len(bearish)
+    if signal == "Buy":
+        lines.append(
+            f"Technical indicators are predominantly bullish "
+            f"({bull_count} bullish vs {bear_count} bearish)."
+        )
+    elif signal == "Sell":
+        lines.append(
+            f"Technical indicators are predominantly bearish "
+            f"({bear_count} bearish vs {bull_count} bullish)."
+        )
+    else:
+        lines.append(
+            f"Mixed signals with no clear direction "
+            f"({bull_count} bullish, {bear_count} bearish)."
+        )
+
+    # Line 2: key drivers
+    if bullish and bearish:
+        lines.append(
+            f"Supported by {', '.join(bullish[:2]).lower()}, "
+            f"but watch {', '.join(bearish[:2]).lower()}."
+        )
+    elif bullish:
+        lines.append(f"Key drivers: {', '.join(bullish[:3]).lower()}.")
+    elif bearish:
+        lines.append(f"Key concerns: {', '.join(bearish[:3]).lower()}.")
+    else:
+        lines.append("All indicators are in neutral territory.")
+
+    # Line 3: actionable guidance
+    if signal == "Buy":
+        if rsi14 is not None and rsi14 <= 35:
+            lines.append("Oversold conditions suggest a potential rebound entry point.")
+        elif change_1m is not None and change_1m > 10:
+            lines.append("Strong momentum, but consider waiting for a pullback to improve entry.")
+        else:
+            lines.append("Uptrend confirmed across multiple timeframes - favorable risk/reward.")
+    elif signal == "Sell":
+        if rsi14 is not None and rsi14 >= 75:
+            lines.append("Overbought with weakening momentum - consider taking profits.")
+        elif change_1m is not None and change_1m < -10:
+            lines.append("Accelerating downtrend - consider reducing exposure or setting tight stops.")
+        else:
+            lines.append("Bearish pressure across indicators - caution warranted at current levels.")
+    else:
+        if bull_count > 0 and bear_count > 0:
+            lines.append("Wait for a clearer breakout before committing to a directional trade.")
+        else:
+            lines.append("Consolidation phase - no urgency to act, monitor for emerging trends.")
+
+    reason = "\n".join(lines)
+    return signal, reason
+
+
 def _fetch_rank_row(ticker: str) -> RankRow | None:
     """Compute a single RankRow from 1y daily data."""
     try:
+        t = yf.Ticker(ticker)
+        info = t.info
+        pe_ratio_raw = info.get("trailingPE") or info.get("forwardPE")
+        pe_ratio = round(float(pe_ratio_raw), 2) if pe_ratio_raw is not None else None
+
         hist = _fetch_ohlcv(ticker, "1y")
         if hist.empty or len(hist) < 2:
             return None
@@ -384,6 +525,10 @@ def _fetch_rank_row(ticker: str) -> RankRow | None:
                 return None
             return round((latest_close - v) / v * 100, 2)
 
+        ma20_dist = _ma_dist(ma20)
+        ma50_dist = _ma_dist(ma50)
+        change_1m = _pct_return(21)
+
         vol_sma20 = volume.rolling(20).mean()
         last_vol = float(volume.iloc[-1])
         last_vol_avg = float(vol_sma20.iloc[-1]) if not pd.isna(vol_sma20.iloc[-1]) else None
@@ -397,21 +542,26 @@ def _fetch_rank_row(ticker: str) -> RankRow | None:
         atr = tr.rolling(14).mean()
         atr14 = round(float(atr.iloc[-1]), 2) if not pd.isna(atr.iloc[-1]) else None
 
+        signal, signal_reason = _compute_signal(rsi14, macd_hist_val, bb_pct, ma20_dist, ma50_dist, change_1m)
+
         return RankRow(
             ticker=ticker,
             price=latest_close,
+            pe_ratio=pe_ratio,
             change_1d=_pct_return(1),
             change_1w=_pct_return(5),
-            change_1m=_pct_return(21),
+            change_1m=change_1m,
             change_3m=_pct_return(63),
             rsi14=rsi14,
             macd_hist=macd_hist_val,
             bb_pct=bb_pct,
-            ma20_dist=_ma_dist(ma20),
-            ma50_dist=_ma_dist(ma50),
+            ma20_dist=ma20_dist,
+            ma50_dist=ma50_dist,
             ma200_dist=_ma_dist(ma200),
             vol_ratio=vol_ratio,
             atr14=atr14,
+            signal=signal,
+            signal_reason=signal_reason,
         )
     except Exception:
         logger.exception("Failed to fetch rank for %s", ticker)

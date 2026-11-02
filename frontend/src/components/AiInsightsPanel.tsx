@@ -51,7 +51,7 @@ export function AiInsightsPanel({ tickers, quotes }: Props) {
         <div className="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
           <Bot size={18} className="text-blue-500" />
           <h3 className="text-sm font-semibold text-gray-700">AI Market Insights</h3>
-          <span className="text-xs text-gray-400 ml-auto">Powered by Databricks GPT-5.2</span>
+          <span className="text-xs text-gray-400 ml-auto">Powered by Gemini 2.5 Flash</span>
         </div>
 
         {/* Messages */}
