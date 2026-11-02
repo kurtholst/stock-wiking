@@ -868,6 +868,59 @@ def discover_patents(request: DiscoverRequest) -> DiscoverResponse:
 _GEMINI_REST_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
+class GeminiError(RuntimeError):
+    """Gemini call failed or returned no usable JSON (blocked, truncated, empty)."""
+
+
+def gemini_json(
+    model: str,
+    system: str,
+    user: str,
+    schema: dict,
+    thinking_budget: int | None = None,
+    timeout: float = 90,
+) -> dict:
+    """Call Gemini generateContent with a JSON response schema and return the parsed JSON.
+
+    Raises GeminiError with a readable reason instead of KeyError on blocked or
+    truncated responses. httpx errors (e.g. 429/503) propagate as httpx.HTTPError.
+    """
+    api_key = _get_gemini_api_key()
+    if not api_key:
+        raise GeminiError("GEMINI_API_KEY not configured")
+    config: dict = {"responseMimeType": "application/json", "responseSchema": schema}
+    if thinking_budget is not None:
+        config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+    resp = httpx.post(
+        _GEMINI_REST_URL.format(model=model),
+        headers={"x-goog-api-key": api_key},  # header, so the key never appears in logged URLs
+        json={
+            "system_instruction": {"parts": [{"text": system}]},
+            "contents": [{"parts": [{"text": user}]}],
+            "generationConfig": config,
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+
+    candidates = body.get("candidates") or []
+    if not candidates:
+        reason = (body.get("promptFeedback") or {}).get("blockReason", "no candidates returned")
+        raise GeminiError(f"{model}: prompt blocked ({reason})")
+    candidate = candidates[0]
+    parts = (candidate.get("content") or {}).get("parts") or []
+    text = "".join(part.get("text", "") for part in parts if not part.get("thought"))
+    finish = candidate.get("finishReason", "")
+    if not text:
+        raise GeminiError(f"{model}: empty response (finishReason={finish or 'unknown'})")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        hint = " - output truncated by token limit" if finish == "MAX_TOKENS" else ""
+        raise GeminiError(f"{model}: invalid JSON (finishReason={finish or 'unknown'}){hint}") from e
+
+
 def analyze_discovery_with_gemini(
     request: DiscoverAnalyzeRequest,
 ) -> DiscoverAnalyzeResponse:
@@ -905,47 +958,36 @@ def analyze_discovery_with_gemini(
         f"Virksomheder og deres patenter:\n{companies_text}"
     )
 
-    url = _GEMINI_REST_URL.format(model=model)
-    resp = httpx.post(
-        f"{url}?key={api_key}",
-        json={
-            "system_instruction": {"parts": [{"text": system_prompt}]},
-            "contents": [{"parts": [{"text": user_prompt}]}],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseSchema": {
+    schema = {
+        "type": "object",
+        "properties": {
+            "rankings": {
+                "type": "array",
+                "items": {
                     "type": "object",
                     "properties": {
-                        "rankings": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "company": {"type": "string"},
-                                    "score": {"type": "string"},
-                                    "reasoning": {"type": "string"},
-                                    "patent_count": {"type": "integer"},
-                                },
-                                "required": [
-                                    "company",
-                                    "score",
-                                    "reasoning",
-                                    "patent_count",
-                                ],
-                            },
-                        },
-                        "summary": {"type": "string"},
+                        "company": {"type": "string"},
+                        "score": {"type": "string"},
+                        "reasoning": {"type": "string"},
+                        "patent_count": {"type": "integer"},
                     },
-                    "required": ["rankings", "summary"],
+                    "required": ["company", "score", "reasoning", "patent_count"],
                 },
             },
+            "summary": {"type": "string"},
         },
-        timeout=60,
-    )
-    resp.raise_for_status()
-
-    result_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-    result = json.loads(result_text)
+        "required": ["rankings", "summary"],
+    }
+    try:
+        result = gemini_json(model, system_prompt, user_prompt, schema, timeout=60)
+    except (GeminiError, httpx.HTTPError) as e:
+        logger.warning("Discovery analysis failed: %s", e)
+        return DiscoverAnalyzeResponse(
+            query=request.query,
+            rankings=[],
+            summary=f"AI-analysen fejlede: {e}",
+            model=model,
+        )
 
     rankings = [
         CompanyRanking(
@@ -1214,42 +1256,28 @@ def _score_companies_with_gemini(
 
     user_prompt = f"Danske virksomheder og deres nylige patenter:\n{companies_text}"
 
-    url = _GEMINI_REST_URL.format(model=model)
-    try:
-        resp = httpx.post(
-            f"{url}?key={api_key}",
-            json={
-                "system_instruction": {"parts": [{"text": system_prompt}]},
-                "contents": [{"parts": [{"text": user_prompt}]}],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "responseSchema": {
-                        "type": "object",
-                        "properties": {
-                            "companies": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "name": {"type": "string"},
-                                        "stars": {"type": "integer"},
-                                        "signal": {"type": "string"},
-                                        "summary": {"type": "string"},
-                                    },
-                                    "required": ["name", "stars", "signal", "summary"],
-                                },
-                            },
-                            "market_summary": {"type": "string"},
-                        },
-                        "required": ["companies", "market_summary"],
+    schema = {
+        "type": "object",
+        "properties": {
+            "companies": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "stars": {"type": "integer"},
+                        "signal": {"type": "string"},
+                        "summary": {"type": "string"},
                     },
+                    "required": ["name", "stars", "signal", "summary"],
                 },
             },
-            timeout=90,
-        )
-        resp.raise_for_status()
-        result_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        data = json.loads(result_text)
+            "market_summary": {"type": "string"},
+        },
+        "required": ["companies", "market_summary"],
+    }
+    try:
+        data = gemini_json(model, system_prompt, user_prompt, schema, timeout=90)
 
         # Map scores back to results
         score_map = {c["name"].lower(): c for c in data.get("companies", [])}

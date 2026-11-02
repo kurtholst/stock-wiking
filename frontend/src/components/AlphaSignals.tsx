@@ -213,7 +213,7 @@ export function AlphaSignals() {
               onClick={() => start('deep', { quarters })}
               disabled={busy}
               className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-50 transition-colors"
-              title="Multi-quarter patent history, co-applicants, velocity, price context and AI theses with extended reasoning"
+              title="Multi-quarter patent history, co-applicants, velocity, price context and AI theses (Gemini Flash with a large thinking budget, free tier)"
             >
               <Brain size={15} />
               Deep analysis

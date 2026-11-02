@@ -6,13 +6,13 @@ Goes beyond the Stars scan:
 - emerging technology classes, new filing offices, new co-applicants
 - share-price context (has the market reacted yet?)
 - a transparent composite Alpha Score
-- an extended-reasoning AI thesis per top candidate and a cross-company memo
+- an AI thesis per top candidate and a cross-company memo (Gemini with a large
+  thinking budget; defaults to free-tier Flash models, override with GEMINI_DEEP_MODEL)
 """
 
 from __future__ import annotations
 
 import datetime
-import json
 import logging
 import os
 import time
@@ -24,17 +24,17 @@ from pydantic import BaseModel
 
 from .alerts import notify_deep
 from .patents import (
-    _GEMINI_REST_URL,
     DANISH_COMPANIES,
     DanishCompany,
+    GeminiError,
     StarsPatentHit,
-    _get_gemini_api_key,
     _ipc_counts,
     _office_counts,
     _share,
     _top,
     _tvd,
     epo_applicant_search,
+    gemini_json,
     load_latest_scan,
 )
 
@@ -315,43 +315,45 @@ def score_company(dc: DeepCompany) -> None:
 
 
 # ---------------------------------------------------------------------------
-# AI (extended reasoning)
+# AI
 # ---------------------------------------------------------------------------
 
-def _gemini_json(model: str, system: str, user: str, schema: dict, thinking_budget: int) -> dict:
-    api_key = _get_gemini_api_key()
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY not configured")
-    resp = httpx.post(
-        f"{_GEMINI_REST_URL.format(model=model)}?key={api_key}",
-        json={
-            "system_instruction": {"parts": [{"text": system}]},
-            "contents": [{"parts": [{"text": user}]}],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseSchema": schema,
-                "thinkingConfig": {"thinkingBudget": thinking_budget},
-            },
-        },
-        timeout=300,
-    )
-    resp.raise_for_status()
-    return json.loads(resp.json()["candidates"][0]["content"]["parts"][0]["text"])
+# Free-tier friendly defaults. Gemini free-tier quotas are per model, so each
+# step of the chain is a separate quota; Flash-Lite is the last resort.
+_DEFAULT_DEEP_MODEL = "gemini-flash-latest"
+_DEFAULT_FALLBACK_MODEL = "gemini-2.5-flash"
+_LAST_RESORT_MODEL = "gemini-flash-lite-latest"
 
 
-def _call_ai(system: str, user: str, schema: dict, warnings: list[str]) -> tuple[dict | None, str]:
-    """Try the deep model first, fall back to the regular one."""
-    deep = os.environ.get("GEMINI_DEEP_MODEL", "gemini-pro-latest")
-    fallback = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-    for model, budget in ((deep, 16384), (fallback, 8192)):
+def _model_chain() -> list[tuple[str, int]]:
+    """(model, thinking budget) in the order to try them, without duplicates."""
+    chain = [
+        (os.environ.get("GEMINI_DEEP_MODEL", _DEFAULT_DEEP_MODEL), 16384),
+        (os.environ.get("GEMINI_MODEL", _DEFAULT_FALLBACK_MODEL), 8192),
+        (_LAST_RESORT_MODEL, 4096),
+    ]
+    seen: set[str] = set()
+    return [(m, b) for m, b in chain if not (m in seen or seen.add(m))]
+
+
+def _call_ai(system: str, user: str, schema: dict, warnings: list[str]) -> tuple[dict | None, str | None]:
+    """Try each model in the chain (2 attempts each).
+
+    Returns (data, model that produced it), or (None, None) if every model failed.
+    """
+    chain = _model_chain()
+    for i, (model, budget) in enumerate(chain):
         for attempt in range(2):
             try:
-                return _gemini_json(model, system, user, schema, budget), model
-            except Exception as e:
+                return gemini_json(model, system, user, schema, thinking_budget=budget, timeout=300), model
+            except (GeminiError, httpx.HTTPError, ValueError) as e:
                 logger.warning("Gemini %s failed (attempt %d): %s", model, attempt + 1, e)
-                time.sleep(5)
-        warnings.append(f"AI model {model} unavailable, fell back")
-    return None, fallback
+                if attempt == 0:
+                    time.sleep(5)
+        if i + 1 < len(chain):
+            warnings.append(f"AI model {model} unavailable, fell back to {chain[i + 1][0]}")
+    warnings.append("All AI models failed - no AI output for this step")
+    return None, None
 
 
 _THESIS_SCHEMA = {
@@ -457,7 +459,14 @@ def run_deep_analysis(quarters: int = 8, trigger: str = "manual", progress=None)
             progress(i, total_steps, msg)
 
     companies: list[DeepCompany] = []
-    model = os.environ.get("GEMINI_DEEP_MODEL", "gemini-pro-latest")
+    models_used: list[str] = []  # models that actually produced output
+
+    def model_label() -> str:
+        return ", ".join(models_used) or _model_chain()[0][0]
+
+    def note_model(model: str | None) -> None:
+        if model and model not in models_used:
+            models_used.append(model)
 
     def publish(phase: str, memo: str = "") -> None:
         """Write the results so far, so the UI can show them while the run continues."""
@@ -471,8 +480,8 @@ def run_deep_analysis(quarters: int = 8, trigger: str = "manual", progress=None)
             themes=[],
             ipc_labels=[],
             memo=memo,
-            model=model,
-            warnings=list(warnings),
+            model=model_label(),
+            warnings=list(dict.fromkeys(warnings)),
             in_progress=True,
             phase=phase,
             companies_done=len(companies),
@@ -494,12 +503,13 @@ def run_deep_analysis(quarters: int = 8, trigger: str = "manual", progress=None)
     companies.sort(key=lambda c: c.alpha_score, reverse=True)
     publish("ai")
 
-    # Extended-reasoning thesis for the top candidates
+    # AI thesis for the top candidates
     candidates = [c for c in companies if c.alpha_score > 0 and any(q.sample for q in c.quarters)][:_AI_TOP_N]
     for j, dc in enumerate(candidates):
         step(n_companies + j, f"AI deep dive: {dc.name}")
         sc = stars_by_ticker.get(dc.ticker)
         data, model = _call_ai(_THESIS_SYSTEM, _thesis_prompt(dc, sc.ai_summary if sc else None), _THESIS_SCHEMA, warnings)
+        note_model(model)
         if data:
             data["conviction"] = max(1, min(5, int(data.get("conviction", 1))))
             dc.thesis = DeepThesis(**data)
@@ -536,6 +546,7 @@ def run_deep_analysis(quarters: int = 8, trigger: str = "manual", progress=None)
     memo_data, memo_model = _call_ai(
         memo_system, f"IPC codes to label: {', '.join(all_codes)}\n\nCompanies:\n{memo_input}", _MEMO_SCHEMA, warnings,
     )
+    note_model(memo_model)
 
     response = AlphaDeepResponse(
         run_at=run_at,
@@ -547,8 +558,8 @@ def run_deep_analysis(quarters: int = 8, trigger: str = "manual", progress=None)
         themes=themes,
         ipc_labels=[IpcLabel(**x) for x in (memo_data or {}).get("ipc_labels", [])],
         memo=(memo_data or {}).get("memo", "AI memo unavailable."),
-        model=memo_model if memo_data else model,
-        warnings=warnings,
+        model=model_label(),
+        warnings=list(dict.fromkeys(warnings)),
     )
     _save(response)
     _DEEP_PARTIAL_FILE.unlink(missing_ok=True)
