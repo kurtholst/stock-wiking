@@ -28,3 +28,21 @@ export function formatCompact(value: number | null | undefined): string {
   if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`;
   return value.toFixed(0);
 }
+
+export function formatRunAt(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString('da-DK', {
+    timeZone: 'Europe/Copenhagen',
+    day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+}
+
+export function timeAgo(iso: string): string {
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60_000);
+  if (Number.isNaN(mins)) return '';
+  if (mins < 60) return `${Math.max(mins, 0)} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} days ago`;
+}

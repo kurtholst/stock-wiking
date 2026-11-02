@@ -1,7 +1,9 @@
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
+from .alpha import load_latest_deep, load_partial_deep, run_deep_analysis
 
 from .analysis import (
     HistoryRequest,
@@ -15,6 +17,8 @@ from .analysis import (
 )
 from .chat import ChatRequest, get_chat_response
 from .db import read_tickers, write_tickers
+from .ipc import get_ipc_titles
+from .runner import RunBusyError, get_status, start_run
 from .patents import (
     CompanySearchRequest,
     DiscoverAnalyzeRequest,
@@ -27,6 +31,7 @@ from .patents import (
     analyze_discovery_with_gemini,
     analyze_patents_with_gemini,
     discover_patents,
+    load_latest_scan,
     run_stars_scan,
     search_dkpto_patents,
     search_epo_patents,
@@ -153,5 +158,59 @@ def patents_dkpto(request: DkptoSearchRequest) -> dict:
 @router.post("/stars/scan")
 def stars_scan(request: StarsScanRequest) -> dict:
     """Run a full Stars scan of Danish OMX Copenhagen companies."""
-    result = run_stars_scan(request.period_days)
+    result = run_stars_scan(request.period_days, use_cache=True)
     return result.model_dump()
+
+
+@router.get("/stars/latest")
+def stars_latest() -> dict | None:
+    """Return the most recent Stars scan (manual or scheduled), or null if none."""
+    result = load_latest_scan()
+    return result.model_dump() if result else None
+
+
+class AlphaRunRequest(BaseModel):
+    kind: str = "stars"  # "stars" or "deep"
+    period_days: int = 90
+    quarters: int = 8
+
+
+@router.post("/alpha/run")
+def alpha_run(request: AlphaRunRequest) -> dict:
+    """Start a Stars scan or a deep alpha analysis in the background."""
+    if request.kind == "stars":
+        def fn(progress):
+            run_stars_scan(request.period_days, trigger="manual", progress=progress)
+    elif request.kind == "deep":
+        def fn(progress):
+            run_deep_analysis(request.quarters, trigger="manual", progress=progress)
+    else:
+        raise HTTPException(400, f"Unknown run kind: {request.kind}")
+    try:
+        return start_run(request.kind, fn)
+    except RunBusyError as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@router.get("/alpha/status")
+def alpha_status() -> dict:
+    return get_status()
+
+
+@router.get("/alpha/deep/latest")
+def alpha_deep_latest() -> dict | None:
+    result = load_latest_deep()
+    return result.model_dump() if result else None
+
+
+@router.get("/alpha/deep/partial")
+def alpha_deep_partial() -> dict | None:
+    """Results so far of a deep analysis that is still running, or null."""
+    result = load_partial_deep()
+    return result.model_dump() if result else None
+
+
+@router.get("/ipc/titles")
+def ipc_titles(codes: str) -> dict[str, str]:
+    """Official titles for comma-separated IPC codes, e.g. ?codes=A61K,G16H."""
+    return get_ipc_titles(codes.split(","))

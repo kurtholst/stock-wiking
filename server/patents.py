@@ -10,9 +10,11 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from collections import defaultdict
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -142,6 +144,22 @@ class StarsPatentHit(BaseModel):
     applicant: str
     filing_date: str | None = None
     publication_date: str | None = None
+    ipc: list[str] = []  # IPC subclasses, e.g. "A61K"
+    applicants: list[str] = []
+
+
+class AreaShift(BaseModel):
+    """Change in a company's patent mix: scan window vs. the prior 12 months."""
+    baseline_count: int = 0
+    recent_count: int = 0
+    ipc_shift: float | None = None           # total variation distance 0..1
+    office_shift: float | None = None        # total variation distance 0..1
+    new_ipc: list[str] = []                  # subclasses absent from the baseline
+    new_offices: list[str] = []              # filing offices absent from the baseline
+    top_ipc_recent: list[str] = []
+    top_ipc_baseline: list[str] = []
+    flagged: bool = False
+    data_complete: bool = True   # False if an EPO lookup failed (counts are lower bounds)
 
 
 class CompanyStarsResult(BaseModel):
@@ -155,6 +173,7 @@ class CompanyStarsResult(BaseModel):
     ai_summary: str | None = None
     stock_price: float | None = None
     stock_change_pct: float | None = None
+    area_shift: AreaShift | None = None
 
 
 class StarsScanRequest(BaseModel):
@@ -168,6 +187,8 @@ class StarsScanResponse(BaseModel):
     total_patents: int
     summary: str
     model: str
+    run_at: str | None = None    # ISO timestamp (UTC) of when the scan ran
+    trigger: str | None = None   # "manual" or "scheduled"
 
 
 # ---------------------------------------------------------------------------
@@ -951,100 +972,188 @@ def analyze_discovery_with_gemini(
 _stars_cache: dict[str, tuple[float, Any]] = {}
 _STARS_CACHE_TTL = 3600  # 1 hour
 
+_STARS_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+_STARS_LATEST_FILE = _STARS_DATA_DIR / "stars_latest.json"
+
+# Baseline window for area-shift detection (days before the scan window)
+_SHIFT_BASELINE_DAYS = 365
+# Minimum sample sizes before a shift is flagged
+_SHIFT_MIN_RECENT = 3
+_SHIFT_MIN_BASELINE = 5
+_SHIFT_THRESHOLD = 0.4
+
+
+_epo_throttle = {"interval": 1.0, "last": 0.0}
+_epo_throttle_lock = threading.Lock()
+
+
+def _epo_wait() -> None:
+    """Space EPO search calls according to the last X-Throttling-Control header."""
+    with _epo_throttle_lock:
+        wait = _epo_throttle["last"] + _epo_throttle["interval"] - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _epo_throttle["last"] = time.time()
+
+
+def _update_epo_throttle(resp: httpx.Response) -> None:
+    # e.g. "busy (images=green:100, ..., search=yellow:5)" - number is requests/minute
+    m = re.search(r"search=(\w+):(\d+)", resp.headers.get("X-Throttling-Control", ""))
+    if not m:
+        return
+    color, per_minute = m.group(1), int(m.group(2))
+    interval = 60 / max(per_minute, 1)
+    if color in ("red", "black"):
+        interval = max(interval, 30)
+    _epo_throttle["interval"] = max(0.5, interval)
+
+
+def _epo_get(params: dict[str, str]) -> httpx.Response | None:
+    """GET the EPO biblio search with throttling and retries. None = gave up."""
+    token_refreshed = False
+    for attempt in range(5):
+        _epo_wait()
+        try:
+            resp = httpx.get(
+                _EPO_SEARCH_BIBLIO_URL,
+                params=params,
+                headers={"Authorization": f"Bearer {_get_epo_access_token_sync()}", "Accept": "application/xml"},
+                timeout=30,
+            )
+        except httpx.HTTPError as e:
+            logger.warning("EPO request error (attempt %d): %s", attempt + 1, e)
+            time.sleep(5 * (attempt + 1))
+            continue
+        _update_epo_throttle(resp)
+        if resp.status_code in (200, 404):  # 404 = no results
+            return resp
+        rejection = resp.headers.get("X-Rejection-Reason", "")
+        if resp.status_code in (400, 401, 403) and not token_refreshed and "throttl" not in rejection.lower():
+            _cache.pop("epo_token", None)
+            token_refreshed = True
+            continue
+        if resp.status_code in (403, 429, 500, 502, 503, 504):
+            retry_after = resp.headers.get("Retry-After", "")
+            delay = float(retry_after) if retry_after.isdigit() else (10, 30, 60, 90, 120)[attempt]
+            logger.info("EPO %s (%s), retrying in %.0fs", resp.status_code, rejection or "-", delay)
+            time.sleep(delay)
+            continue
+        logger.warning("EPO search failed: HTTP %s %s", resp.status_code, resp.text[:200])
+        return None
+    return None
+
+
+def _format_epo_date(raw: str) -> str:
+    raw = raw.strip()
+    return f"{raw[:4]}-{raw[4:6]}-{raw[6:]}" if len(raw) == 8 else raw
+
+
+def _parse_stars_hits(root: ET.Element, default_applicant: str) -> list[StarsPatentHit]:
+    hits: list[StarsPatentHit] = []
+    for doc in root.findall(".//ex:exchange-document", _NS_DISCOVER):
+        title = ""
+        for inv_title in doc.findall(".//ex:invention-title", _NS_DISCOVER):
+            lang = inv_title.get("lang", "")
+            text = (inv_title.text or "").strip()
+            if lang == "en" and text:
+                title = text
+                break
+            if not title and text:
+                title = text
+
+        country = doc.get("country", "")
+        doc_number = doc.get("doc-number", "")
+        kind = doc.get("kind", "")
+        patent_number = f"{country}{doc_number}{kind}" if doc_number else ""
+
+        filing_date = None
+        for app_ref in doc.findall(".//ex:application-reference", _NS_DISCOVER):
+            date_el = app_ref.find(".//ex:date", _NS_DISCOVER)
+            if date_el is not None and date_el.text:
+                filing_date = _format_epo_date(date_el.text)
+                break
+
+        pub_date = None
+        pub_ref = doc.find(".//ex:publication-reference", _NS_DISCOVER)
+        if pub_ref is not None:
+            pd_el = pub_ref.find(".//ex:date", _NS_DISCOVER)
+            if pd_el is not None and pd_el.text:
+                pub_date = _format_epo_date(pd_el.text)
+
+        # Prefer the normalised Latin "epodoc" names; "original" ones may be in CJK scripts
+        app_els = doc.findall(".//ex:applicants/ex:applicant", _NS_DISCOVER)
+        epodoc = [a for a in app_els if a.get("data-format") == "epodoc"]
+        applicants: list[str] = []
+        for app_el in epodoc or app_els:
+            name_el = app_el.find(".//ex:name", _NS_DISCOVER)
+            if name_el is not None and name_el.text:
+                name = _normalize_applicant(name_el.text)
+                if name and name not in applicants:
+                    applicants.append(name)
+
+        ipc: list[str] = []
+        for ipc_el in doc.findall(".//ex:classifications-ipcr/ex:classification-ipcr/ex:text", _NS_DISCOVER):
+            subclass = (ipc_el.text or "").replace(" ", "")[:4]
+            if len(subclass) == 4 and subclass not in ipc:
+                ipc.append(subclass)
+
+        if patent_number and title:
+            hits.append(StarsPatentHit(
+                patent_number=patent_number,
+                title=title,
+                applicant=applicants[0] if applicants else default_applicant,
+                applicants=applicants,
+                filing_date=filing_date,
+                publication_date=pub_date,
+                ipc=ipc,
+            ))
+    return hits
+
+
+def epo_applicant_search(
+    epo_name: str,
+    date_from: str,
+    date_to: str,
+    max_results: int = 25,
+) -> tuple[list[StarsPatentHit], int] | None:
+    """Search EPO OPS by applicant within a publication-date range.
+
+    Returns (hits, total_result_count), or None if EPO could not be queried.
+    """
+    cql = f'pa="{epo_name}" AND pd within "{date_from} {date_to}"'
+    hits: list[StarsPatentHit] = []
+    total = 0
+    for first in range(1, max_results + 1, 100):  # EPO pages are at most 100
+        last = min(first + 99, max_results)
+        resp = _epo_get({"q": cql, "Range": f"{first}-{last}"})
+        if resp is None:
+            return None
+        if resp.status_code == 404:
+            break
+        try:
+            root = ET.fromstring(resp.text)
+        except ET.ParseError:
+            return None
+        search_el = root.find(".//ops:biblio-search", _NS_DISCOVER)
+        total = int(search_el.get("total-result-count", "0")) if search_el is not None else 0
+        hits.extend(_parse_stars_hits(root, epo_name))
+        if last >= total:
+            break
+    return hits, total
+
 
 def _search_epo_patents_sync(
     epo_name: str,
     date_from: str,
     date_to: str,
-) -> list[StarsPatentHit]:
-    """Search EPO OPS for patents by applicant name within date range (sync)."""
-    token = _get_epo_access_token_sync()
-    cql = f'pa="{epo_name}" AND pd within "{date_from} {date_to}"'
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/xml",
-    }
-
-    try:
-        resp = httpx.get(
-            _EPO_SEARCH_BIBLIO_URL,
-            params={"q": cql, "Range": "1-25"},
-            headers=headers,
-            timeout=20,
-        )
-        if resp.status_code == 404:
-            return []
-        if resp.status_code == 403:
-            _cache.pop("epo_token", None)
-            token = _get_epo_access_token_sync()
-            headers["Authorization"] = f"Bearer {token}"
-            resp = httpx.get(
-                _EPO_SEARCH_BIBLIO_URL,
-                params={"q": cql, "Range": "1-25"},
-                headers=headers,
-                timeout=20,
-            )
-        if resp.status_code != 200:
-            return []
-
-        hits: list[StarsPatentHit] = []
-        try:
-            root = ET.fromstring(resp.text)
-        except ET.ParseError:
-            return []
-
-        for doc in root.findall(".//ex:exchange-document", _NS_DISCOVER):
-            title = ""
-            for inv_title in doc.findall(".//ex:invention-title", _NS_DISCOVER):
-                lang = inv_title.get("lang", "")
-                text = (inv_title.text or "").strip()
-                if lang == "en" and text:
-                    title = text
-                    break
-                if not title and text:
-                    title = text
-
-            country = doc.get("country", "")
-            doc_number = doc.get("doc-number", "")
-            kind = doc.get("kind", "")
-            patent_number = f"{country}{doc_number}{kind}" if doc_number else ""
-
-            filing_date = None
-            for app_ref in doc.findall(".//ex:application-reference", _NS_DISCOVER):
-                date_el = app_ref.find(".//ex:date", _NS_DISCOVER)
-                if date_el is not None and date_el.text:
-                    raw = date_el.text.strip()
-                    filing_date = f"{raw[:4]}-{raw[4:6]}-{raw[6:]}" if len(raw) == 8 else raw
-                    break
-
-            pub_date = None
-            pub_ref = doc.find(".//ex:publication-reference", _NS_DISCOVER)
-            if pub_ref is not None:
-                pd_el = pub_ref.find(".//ex:date", _NS_DISCOVER)
-                if pd_el is not None and pd_el.text:
-                    raw = pd_el.text.strip()
-                    pub_date = f"{raw[:4]}-{raw[4:6]}-{raw[6:]}" if len(raw) == 8 else raw
-
-            applicant = ""
-            for app_el in doc.findall(".//ex:applicants/ex:applicant", _NS_DISCOVER):
-                name_el = app_el.find(".//ex:name", _NS_DISCOVER)
-                if name_el is not None and name_el.text:
-                    applicant = _normalize_applicant(name_el.text)
-                    break
-
-            if patent_number and title:
-                hits.append(StarsPatentHit(
-                    patent_number=patent_number,
-                    title=title,
-                    applicant=applicant or epo_name,
-                    filing_date=filing_date,
-                    publication_date=pub_date,
-                ))
-
-        return hits
-    except Exception as e:
-        logger.warning("Stars EPO search failed for %s: %s", epo_name, e)
-        return []
+    max_results: int = 25,
+) -> list[StarsPatentHit] | None:
+    """Search EPO OPS for patents by applicant name within date range. None = failed."""
+    result = epo_applicant_search(epo_name, date_from, date_to, max_results)
+    if result is None:
+        logger.warning("Stars EPO search failed for %s (%s-%s)", epo_name, date_from, date_to)
+        return None
+    return result[0]
 
 
 def _enrich_stock_prices(results: list[CompanyStarsResult]) -> None:
@@ -1157,36 +1266,147 @@ def _score_companies_with_gemini(
         return f"AI-scoring fejlede: {e}", model
 
 
-def run_stars_scan(period_days: int = 90) -> StarsScanResponse:
-    """Run a full Stars scan of Danish companies."""
+def _search_company_sync(
+    company: DanishCompany,
+    date_from: str,
+    date_to: str,
+    max_results: int = 25,
+) -> tuple[list[StarsPatentHit], bool]:
+    """Search all EPO applicant names for a company, deduplicated by patent number.
+
+    Returns (hits, complete) - complete is False if any lookup failed.
+    """
+    seen: set[str] = set()
+    unique_hits: list[StarsPatentHit] = []
+    complete = True
+    for epo_name in company.epo_names:
+        hits = _search_epo_patents_sync(epo_name, date_from, date_to, max_results)
+        if hits is None:
+            complete = False
+            continue
+        for h in hits:
+            if h.patent_number not in seen:
+                seen.add(h.patent_number)
+                unique_hits.append(h)
+    return unique_hits, complete
+
+
+def _share(counts: dict[str, float]) -> dict[str, float]:
+    total = sum(counts.values())
+    return {k: v / total for k, v in counts.items()} if total else {}
+
+
+def _tvd(a: dict[str, float], b: dict[str, float]) -> float:
+    """Total variation distance between two distributions (0 = identical, 1 = disjoint)."""
+    keys = set(a) | set(b)
+    return round(0.5 * sum(abs(a.get(k, 0.0) - b.get(k, 0.0)) for k in keys), 3)
+
+
+def _ipc_counts(hits: list[StarsPatentHit]) -> dict[str, float]:
+    # Each patent contributes weight 1, split across its IPC subclasses
+    counts: dict[str, float] = defaultdict(float)
+    for h in hits:
+        for c in h.ipc:
+            counts[c] += 1 / len(h.ipc)
+    return counts
+
+
+def _office_counts(hits: list[StarsPatentHit]) -> dict[str, float]:
+    counts: dict[str, float] = defaultdict(float)
+    for h in hits:
+        office = h.patent_number[:2]
+        if office.isalpha():
+            counts[office] += 1
+    return counts
+
+
+def _top(counts: dict[str, float], n: int = 3) -> list[str]:
+    return [k for k, _ in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:n]]
+
+
+def compute_area_shift(
+    recent: list[StarsPatentHit],
+    baseline: list[StarsPatentHit],
+    data_complete: bool = True,
+) -> AreaShift:
+    """Compare technology (IPC) and filing-office mix of recent vs. baseline patents."""
+    ipc_recent, ipc_base = _ipc_counts(recent), _ipc_counts(baseline)
+    off_recent, off_base = _office_counts(recent), _office_counts(baseline)
+    enough = len(recent) >= _SHIFT_MIN_RECENT and len(baseline) >= _SHIFT_MIN_BASELINE
+
+    ipc_shift = _tvd(_share(ipc_recent), _share(ipc_base)) if enough and ipc_recent and ipc_base else None
+    office_shift = _tvd(_share(off_recent), _share(off_base)) if enough and off_recent and off_base else None
+    new_ipc = [c for c in _top(ipc_recent, 10) if c not in ipc_base] if baseline else []
+    new_offices = [o for o in _top(off_recent, 10) if o not in off_base] if baseline else []
+
+    return AreaShift(
+        baseline_count=len(baseline),
+        recent_count=len(recent),
+        ipc_shift=ipc_shift,
+        office_shift=office_shift,
+        new_ipc=new_ipc,
+        new_offices=new_offices,
+        top_ipc_recent=_top(ipc_recent),
+        top_ipc_baseline=_top(ipc_base),
+        flagged=data_complete and any(x is not None and x >= _SHIFT_THRESHOLD for x in (ipc_shift, office_shift)),
+        data_complete=data_complete,
+    )
+
+
+def _save_latest_scan(response: StarsScanResponse) -> None:
+    try:
+        _STARS_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _STARS_LATEST_FILE.with_suffix(".tmp")
+        tmp.write_text(response.model_dump_json(indent=2))
+        tmp.replace(_STARS_LATEST_FILE)
+    except OSError:
+        logger.exception("Could not persist Stars scan")
+
+
+def load_latest_scan() -> StarsScanResponse | None:
+    """Return the most recently persisted Stars scan (manual or scheduled)."""
+    if not _STARS_LATEST_FILE.exists():
+        return None
+    try:
+        return StarsScanResponse.model_validate_json(_STARS_LATEST_FILE.read_text())
+    except Exception:
+        logger.exception("Could not read persisted Stars scan")
+        return None
+
+
+def run_stars_scan(
+    period_days: int = 90,
+    trigger: str = "manual",
+    use_cache: bool = False,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> StarsScanResponse:
+    """Run a full Stars scan of Danish companies.
+
+    progress(step, total, message) is called as companies are processed.
+    """
     import datetime
 
     cache_key = f"stars:{period_days}"
     cached = _stars_cache.get(cache_key)
-    if cached and (time.time() - cached[0]) < _STARS_CACHE_TTL:
+    if use_cache and cached and (time.time() - cached[0]) < _STARS_CACHE_TTL:
         return cached[1]
 
     today = datetime.date.today()
-    date_from = (today - datetime.timedelta(days=period_days)).strftime("%Y%m%d")
+    window_start = today - datetime.timedelta(days=period_days)
+    date_from = window_start.strftime("%Y%m%d")
     date_to = today.strftime("%Y%m%d")
+    base_from = (window_start - datetime.timedelta(days=_SHIFT_BASELINE_DAYS)).strftime("%Y%m%d")
+    base_to = (window_start - datetime.timedelta(days=1)).strftime("%Y%m%d")
 
     results: list[CompanyStarsResult] = []
     total_patents = 0
 
-    for company in DANISH_COMPANIES:
-        all_hits: list[StarsPatentHit] = []
-        for epo_name in company.epo_names:
-            hits = _search_epo_patents_sync(epo_name, date_from, date_to)
-            all_hits.extend(hits)
-            time.sleep(0.5)  # Rate limiting
-
-        # Deduplicate by patent_number
-        seen: set[str] = set()
-        unique_hits: list[StarsPatentHit] = []
-        for h in all_hits:
-            if h.patent_number not in seen:
-                seen.add(h.patent_number)
-                unique_hits.append(h)
+    n_steps = len(DANISH_COMPANIES) + 2
+    for i, company in enumerate(DANISH_COMPANIES):
+        if progress:
+            progress(i, n_steps, f"Fetching patents: {company.name}")
+        unique_hits, recent_ok = _search_company_sync(company, date_from, date_to)
+        baseline_hits, base_ok = _search_company_sync(company, base_from, base_to, max_results=100)
 
         total_patents += len(unique_hits)
         results.append(CompanyStarsResult(
@@ -1195,12 +1415,17 @@ def run_stars_scan(period_days: int = 90) -> StarsScanResponse:
             sector=company.sector,
             patent_count=len(unique_hits),
             recent_patents=unique_hits[:10],
+            area_shift=compute_area_shift(unique_hits, baseline_hits, recent_ok and base_ok),
         ))
 
     # AI scoring (single consolidated call)
+    if progress:
+        progress(len(DANISH_COMPANIES), n_steps, "AI scoring with Gemini")
     summary, model = _score_companies_with_gemini(results)
 
     # Enrich with stock prices
+    if progress:
+        progress(len(DANISH_COMPANIES) + 1, n_steps, "Fetching share prices")
     _enrich_stock_prices(results)
 
     # Sort by stars (desc), then patent count
@@ -1213,9 +1438,12 @@ def run_stars_scan(period_days: int = 90) -> StarsScanResponse:
         total_patents=total_patents,
         summary=summary,
         model=model,
+        run_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        trigger=trigger,
     )
 
     _stars_cache[cache_key] = (time.time(), response)
+    _save_latest_scan(response)
     return response
 
 

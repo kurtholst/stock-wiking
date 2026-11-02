@@ -1,0 +1,12 @@
+# Daily Stars scan at 06:00 Danish time. Persistent=true catches up after downtime.
+# Install: systemctl --user daemon-reload && systemctl --user enable --now stars-scan.timer
+[Unit]
+Description=Daily Stars patent scan
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 Europe/Copenhagen
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

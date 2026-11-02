@@ -14,8 +14,9 @@ import { CompanySearch } from './components/CompanySearch';
 import { CompanyAI } from './components/CompanyAI';
 import { DkptoSearch } from './components/DkptoSearch';
 import { StarsLeaderboard } from './components/StarsLeaderboard';
+import { AlphaSignals } from './components/AlphaSignals';
 
-type Tab = 'dashboard' | 'charts' | 'technicals' | 'table' | 'rank' | 'ai' | 'patents' | 'company-search' | 'company-ai' | 'dkpto' | 'stars';
+type Tab = 'alpha' | 'dashboard' | 'charts' | 'technicals' | 'table' | 'rank' | 'ai' | 'patents' | 'company-search' | 'company-ai' | 'dkpto' | 'stars';
 
 const C25_TICKERS = [
   'NOVO-B.CO', 'MAERSK-B.CO', 'DSV.CO', 'DANSKE.CO', 'VWS.CO',
@@ -116,6 +117,7 @@ export default function App() {
   }
 
   const tabs: { id: Tab; label: string }[] = [
+    { id: 'alpha', label: 'Alpha-signals' },
     { id: 'dashboard', label: 'Dashboard' },
     { id: 'charts', label: 'Charts' },
     { id: 'technicals', label: 'Technical Analysis' },
@@ -141,7 +143,8 @@ export default function App() {
         </button>
         <TrendingUp size={22} className="text-blue-500" />
         <h1 className="text-xl font-semibold text-gray-800">Stock Ticker Analyzer</h1>
-        <div className="ml-auto">
+        {/* mr-24 keeps the toggle clear of the nginx-injected "Log ud" button (fixed top-right) */}
+        <div className="ml-auto mr-24">
           <button
             onClick={() => setC25Mode(!c25Mode)}
             className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${
@@ -190,6 +193,7 @@ export default function App() {
 
           {/* Tab content */}
           <div className="flex-1 overflow-auto p-4">
+            {activeTab === 'alpha' && <AlphaSignals />}
             {activeTab === 'dashboard' && <Dashboard tickers={activeTickers} quotes={quotes} dirty={dirty} onSave={handleSaveTickers} />}
             {activeTab === 'charts' && <PriceCharts tickers={activeTickers} />}
             {activeTab === 'technicals' && <TechnicalAnalysis tickers={activeTickers} />}

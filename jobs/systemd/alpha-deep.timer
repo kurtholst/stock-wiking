@@ -1,0 +1,11 @@
+# Weekly deep alpha analysis, Sunday 07:00 Danish time (after the daily 06:00 Stars scan).
+[Unit]
+Description=Weekly deep alpha analysis
+
+[Timer]
+OnCalendar=Sun *-*-* 07:00:00 Europe/Copenhagen
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

@@ -4,6 +4,7 @@ import type {
   DiscoverRequest, DiscoverResponse, DiscoverAnalyzeRequest, DiscoverAnalyzeResponse,
   DkptoSearchRequest, DkptoSearchResponse,
   StarsScanResponse,
+  RunKind, RunStatus, AlphaDeepResponse,
 } from './types';
 
 export async function fetchTickers(): Promise<{ tickers: string[] }> {
@@ -148,5 +149,53 @@ export async function runStarsScan(periodDays: number = 90): Promise<StarsScanRe
     body: JSON.stringify({ period_days: periodDays }),
   });
   if (!res.ok) throw new Error('Stars scan failed');
+  return res.json();
+}
+
+export async function fetchLatestStars(): Promise<StarsScanResponse | null> {
+  const res = await fetch('/stock/api/stars/latest');
+  if (!res.ok) throw new Error('Failed to fetch latest Stars scan');
+  return res.json();
+}
+
+// --- Background runs (Alpha-signals) ---
+
+export async function startRun(
+  kind: RunKind,
+  opts: { period_days?: number; quarters?: number } = {},
+): Promise<RunStatus> {
+  const res = await fetch('/stock/api/alpha/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind, ...opts }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.detail ?? 'Could not start run');
+  }
+  return res.json();
+}
+
+export async function fetchRunStatus(): Promise<RunStatus> {
+  const res = await fetch('/stock/api/alpha/status');
+  if (!res.ok) throw new Error('Failed to fetch run status');
+  return res.json();
+}
+
+export async function fetchLatestDeep(): Promise<AlphaDeepResponse | null> {
+  const res = await fetch('/stock/api/alpha/deep/latest');
+  if (!res.ok) throw new Error('Failed to fetch deep analysis');
+  return res.json();
+}
+
+export async function fetchPartialDeep(): Promise<AlphaDeepResponse | null> {
+  const res = await fetch('/stock/api/alpha/deep/partial');
+  if (!res.ok) throw new Error('Failed to fetch live deep analysis');
+  return res.json();
+}
+
+export async function fetchIpcTitles(codes: string[]): Promise<Record<string, string>> {
+  const res = await fetch(`/stock/api/ipc/titles?codes=${encodeURIComponent(codes.join(','))}`);
+  if (!res.ok) throw new Error('Failed to fetch IPC titles');
   return res.json();
 }

@@ -1,0 +1,11 @@
+# Runs the Stars patent scan and persists it to data/stars_latest.json.
+# Install as a user unit: ~/.config/systemd/user/stars-scan.service
+[Unit]
+Description=Stock Wiking - scheduled Stars patent scan
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/eyvind/stock-wiking
+ExecStart=/home/eyvind/stock-wiking/.venv/bin/python jobs/run_stars_scan.py --period-days 90
+TimeoutStartSec=30min

@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Star, Loader2, ChevronDown, ChevronRight, Sparkles, TrendingUp, TrendingDown } from 'lucide-react';
 import type { CompanyStarsResult, StarsScanResponse } from '../types';
-import { runStarsScan } from '../api';
+import { fetchLatestStars } from '../api';
+import { useRunStatus } from '../useRunStatus';
+import { formatRunAt } from '../utils';
 
 interface Props {
   onAddTicker: (ticker: string) => void;
@@ -40,28 +42,28 @@ function SignalBadge({ signal }: { signal: string | null }) {
 export function StarsLeaderboard({ onAddTicker }: Props) {
   const [periodDays, setPeriodDays] = useState(90);
   const [scanResult, setScanResult] = useState<StarsScanResponse | null>(null);
-  const [scanning, setScanning] = useState(false);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
 
-  const handleScan = async () => {
-    setScanning(true);
-    setScanResult(null);
+  // Show the latest persisted scan (manual or scheduled)
+  const loadLatest = useCallback((updatePeriod: boolean) => {
+    fetchLatestStars()
+      .then((latest) => {
+        if (latest) {
+          setScanResult(latest);
+          if (updatePeriod) setPeriodDays(latest.period_days);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => loadLatest(true), [loadLatest]);
+
+  // Scans run in the background on the server; reload when one finishes
+  const { status, busy: scanning, start, startError } = useRunStatus(() => loadLatest(false));
+
+  const handleScan = () => {
     setExpandedRows(new Set());
-    try {
-      const result = await runStarsScan(periodDays);
-      setScanResult(result);
-    } catch (e) {
-      setScanResult({
-        scan_date: new Date().toISOString().split('T')[0],
-        period_days: periodDays,
-        companies: [],
-        total_patents: 0,
-        summary: e instanceof Error ? e.message : 'Scan fejlede',
-        model: '',
-      });
-    } finally {
-      setScanning(false);
-    }
+    start('stars', { period_days: periodDays });
   };
 
   const toggleRow = (ticker: string) => {
@@ -97,9 +99,21 @@ export function StarsLeaderboard({ onAddTicker }: Props) {
             Scan danske patenter
           </button>
 
+          {scanning && (
+            <span className="text-xs text-gray-500">
+              {status?.external_running
+                ? 'Planlagt kørsel i gang...'
+                : `${status?.message ?? ''}${status?.total ? ` (${status.step + 1}/${status.total})` : ''}`}
+            </span>
+          )}
+          {startError && <span className="text-xs text-red-600">{startError}</span>}
+
           {scanResult && (
             <div className="ml-auto flex items-center gap-2 text-xs text-gray-500">
-              <span>Dato: {scanResult.scan_date}</span>
+              <span>
+                Sidst kørt: {scanResult.run_at ? formatRunAt(scanResult.run_at) : scanResult.scan_date}
+                {scanResult.trigger === 'scheduled' && ' (automatisk)'}
+              </span>
               <span className="text-gray-300">|</span>
               <span>{scanResult.total_patents} patenter fundet</span>
               {scanResult.model && (
@@ -175,14 +189,14 @@ export function StarsLeaderboard({ onAddTicker }: Props) {
       )}
 
       {/* Loading state */}
-      {scanning && (
+      {scanning && !scanResult && (
         <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
           <Loader2 size={32} className="mx-auto mb-3 text-amber-500 animate-spin" />
           <p className="text-gray-500 text-sm">Scanner danske virksomheder...</p>
           <p className="text-gray-400 text-xs mt-1">
             Henter patenter fra EPO, scorer med AI og beriger med aktiekurser.
             <br />
-            Dette kan tage 1-2 minutter.
+            Dette kan tage 5-15 minutter afhængigt af belastningen hos EPO.
           </p>
         </div>
       )}

@@ -1,0 +1,11 @@
+# Deep alpha analysis (multi-quarter patent shift study + AI theses).
+# Install as a user unit: ~/.config/systemd/user/alpha-deep.service
+[Unit]
+Description=Stock Wiking - scheduled deep alpha analysis
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/eyvind/stock-wiking
+ExecStart=/home/eyvind/stock-wiking/.venv/bin/python jobs/run_stars_scan.py --deep --quarters 8
+TimeoutStartSec=3h

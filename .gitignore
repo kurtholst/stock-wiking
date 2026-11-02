@@ -6,3 +6,6 @@ node_modules/
 frontend/dist/
 .env
 uv.lock
+
+# Persisted scan results (Stars)
+data/
