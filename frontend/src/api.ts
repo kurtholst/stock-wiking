@@ -199,3 +199,27 @@ export async function fetchIpcTitles(codes: string[]): Promise<Record<string, st
   if (!res.ok) throw new Error('Failed to fetch IPC titles');
   return res.json();
 }
+
+// --- Phone alerts (ntfy) ---
+
+export interface SentAlert {
+  key: string;
+  sent_at: string;
+  level: 'critical' | 'notable' | 'digest';
+  title: string;
+  message: string;
+}
+
+export async function fetchAlertsStatus(): Promise<{ configured: boolean; recent: SentAlert[] }> {
+  const res = await fetch('/stock/api/alerts/status');
+  if (!res.ok) throw new Error('Failed to fetch alert status');
+  return res.json();
+}
+
+export async function sendTestAlert(): Promise<void> {
+  const res = await fetch('/stock/api/alerts/test', { method: 'POST' });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.detail ?? 'Test alert failed');
+  }
+}

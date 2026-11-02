@@ -22,6 +22,7 @@ from pathlib import Path
 import httpx
 from pydantic import BaseModel
 
+from .alerts import notify_deep
 from .patents import (
     _GEMINI_REST_URL,
     DANISH_COMPANIES,
@@ -551,6 +552,7 @@ def run_deep_analysis(quarters: int = 8, trigger: str = "manual", progress=None)
     )
     _save(response)
     _DEEP_PARTIAL_FILE.unlink(missing_ok=True)
+    notify_deep(response)
     return response
 
 

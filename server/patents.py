@@ -1444,6 +1444,9 @@ def run_stars_scan(
 
     _stars_cache[cache_key] = (time.time(), response)
     _save_latest_scan(response)
+
+    from .alerts import notify_stars  # local import: alerts depends on this module's models
+    notify_stars(response)
     return response
 
 

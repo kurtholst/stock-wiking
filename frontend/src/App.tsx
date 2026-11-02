@@ -29,7 +29,10 @@ const C25_TICKERS = [
 export default function App() {
   const [tickers, setTickers] = useState<string[]>([]);
   const [quotes, setQuotes] = useState<Map<string, QuoteData>>(new Map());
-  const [activeTab, setActiveTab] = useState<Tab>('dashboard');
+  // ?tab=alpha deep-links from phone alerts
+  const [activeTab, setActiveTab] = useState<Tab>(() =>
+    new URLSearchParams(window.location.search).get('tab') === 'alpha' ? 'alpha' : 'dashboard',
+  );
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const savedTickersRef = useRef<string[]>([]);
   const [dirty, setDirty] = useState(false);

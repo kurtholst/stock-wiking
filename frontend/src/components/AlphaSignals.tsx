@@ -7,6 +7,7 @@ import { fetchLatestDeep, fetchLatestStars, fetchPartialDeep } from '../api';
 import { useRunStatus } from '../useRunStatus';
 import { AlphaDeep } from './AlphaDeep';
 import { IpcCode } from './IpcCode';
+import { AlertsPanel } from './AlertsPanel';
 import { formatRunAt, timeAgo } from '../utils';
 
 const OFFICES: Record<string, string> = {
@@ -112,6 +113,7 @@ export function AlphaSignals() {
   const [error, setError] = useState<string | null>(null);
   const [deep, setDeep] = useState<AlphaDeepResponse | null>(null);
   const [quarters, setQuarters] = useState(8);
+  const [focus] = useState(() => new URLSearchParams(window.location.search).get('focus'));
 
   const load = useCallback((kind?: RunKind | null) => {
     if (kind !== 'deep') {
@@ -257,6 +259,8 @@ export function AlphaSignals() {
         {startError && <p className="mt-2 text-xs text-red-600">{startError}</p>}
       </div>
 
+      <AlertsPanel refreshKey={`${scan?.run_at}-${deep?.finished_at}`} />
+
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl p-3">{error}</div>
       )}
@@ -336,7 +340,11 @@ export function AlphaSignals() {
                   {shiftRows.map((c) => {
                     const s = c.area_shift!;
                     return (
-                      <tr key={c.ticker} className={`border-b border-gray-100 ${s.flagged ? 'bg-rose-50/50' : ''}`}>
+                      <tr
+                        key={c.ticker}
+                        id={`shift-${c.ticker}`}
+                        className={`border-b border-gray-100 ${c.ticker === focus ? 'bg-amber-50 ring-1 ring-inset ring-amber-300' : s.flagged ? 'bg-rose-50/50' : ''}`}
+                      >
                         <td className="px-4 py-2">
                           <span className="font-medium text-gray-800">{c.name}</span>
                           <span className="text-xs text-gray-400 ml-2">{c.sector}</span>
@@ -435,7 +443,7 @@ export function AlphaSignals() {
         </div>
       )}
 
-      {!loading && <AlphaDeep deep={deepRunning && liveDeep ? liveDeep : deep} />}
+      {!loading && <AlphaDeep deep={deepRunning && liveDeep ? liveDeep : deep} focus={focus} />}
 
       {/* Signal guide */}
       <div className="bg-white rounded-xl border border-gray-200 p-4">

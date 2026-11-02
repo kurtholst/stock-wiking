@@ -16,6 +16,7 @@ from .analysis import (
     validate_ticker,
 )
 from .chat import ChatRequest, get_chat_response
+from .alerts import deep_alerts, dispatch, is_configured, recent_alerts, send, stars_alerts
 from .db import read_tickers, write_tickers
 from .ipc import get_ipc_titles
 from .runner import RunBusyError, get_status, start_run
@@ -214,3 +215,30 @@ def alpha_deep_partial() -> dict | None:
 def ipc_titles(codes: str) -> dict[str, str]:
     """Official titles for comma-separated IPC codes, e.g. ?codes=A61K,G16H."""
     return get_ipc_titles(codes.split(","))
+
+
+@router.get("/alerts/status")
+def alerts_status() -> dict:
+    return {"configured": is_configured(), "recent": recent_alerts()}
+
+
+@router.post("/alerts/test")
+def alerts_test() -> dict:
+    if not is_configured():
+        raise HTTPException(400, "NTFY_TOPIC is not configured")
+    send("Test from Stock Wiking", "Phone alerts for alpha signals are working.", "test")
+    return {"sent": True}
+
+
+@router.post("/alerts/check")
+def alerts_check() -> dict:
+    """Evaluate the latest stored Stars scan and deep analysis now (unsent signals only)."""
+    alerts = []
+    scan = load_latest_scan()
+    if scan:
+        alerts += stars_alerts(scan)
+    deep = load_latest_deep()
+    if deep:
+        alerts += deep_alerts(deep)
+    sent = dispatch(alerts)
+    return {"evaluated": len(alerts), "sent": [a.model_dump() for a in sent]}

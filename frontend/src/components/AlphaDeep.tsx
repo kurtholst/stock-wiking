@@ -1,4 +1,4 @@
-import { Fragment, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import {
   Brain, ChevronDown, ChevronRight, Clock, Lightbulb, ShieldAlert, CheckCircle2, XCircle, Network, AlertTriangle,
   TrendingUp, TrendingDown, Minus, Loader2,
@@ -143,9 +143,15 @@ function CompanyDetail({ c, label }: { c: DeepCompany; label: (code: string) => 
   );
 }
 
-export function AlphaDeep({ deep }: { deep: AlphaDeepResponse | null }) {
+export function AlphaDeep({ deep, focus }: { deep: AlphaDeepResponse | null; focus?: string | null }) {
   // deep.in_progress = live results of a run that is still going
-  const [open, setOpen] = useState<Set<string>>(new Set());
+  const [open, setOpen] = useState<Set<string>>(() => new Set(focus ? [focus] : []));
+
+  // Alert deep link (?focus=TICKER): open and scroll to that company once it is rendered
+  const focusInDeep = !!focus && !!deep?.companies.some((c) => c.ticker === focus);
+  useEffect(() => {
+    if (focusInDeep) document.getElementById(`deep-${focus}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [focusInDeep, focus]);
   if (!deep) {
     return (
       <div className="bg-white rounded-xl border border-gray-200 p-6 text-center text-sm text-gray-500">
@@ -243,7 +249,11 @@ export function AlphaDeep({ deep }: { deep: AlphaDeepResponse | null }) {
               const isOpen = open.has(c.ticker);
               return (
                 <Fragment key={c.ticker}>
-                  <tr className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer" onClick={() => toggle(c.ticker)}>
+                  <tr
+                    id={`deep-${c.ticker}`}
+                    className={`border-b border-gray-100 hover:bg-gray-50 cursor-pointer ${c.ticker === focus ? 'bg-amber-50' : ''}`}
+                    onClick={() => toggle(c.ticker)}
+                  >
                     <td className="pl-3 text-gray-400">{isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</td>
                     <td className="px-3 py-2">
                       <span className="font-medium text-gray-800">{c.name}</span>
