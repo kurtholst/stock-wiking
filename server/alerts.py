@@ -3,6 +3,8 @@
 Evaluated after every Stars scan and deep analysis (manual or scheduled).
 Each signal is sent once: sent keys are remembered in data/alerts_sent.json
 and expire after _RESEND_AFTER_DAYS, so a persisting signal can re-alert later.
+After every scheduled Stars scan a daily summary of the top critical signals is
+also sent, regardless of whether they were sent before.
 
 Config (.env):
     NTFY_TOPIC      required - long random topic name (acts as the password)
@@ -47,6 +49,7 @@ class Alert(BaseModel):
     title: str
     message: str
     ticker: str | None = None
+    score: float = 0.0  # 0..100, ranks critical signals in the daily summary
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +71,8 @@ def stars_alerts(scan) -> list[Alert]:
                 key=f"stars:{c.ticker}:{','.join(sorted(s.new_ipc))}",
                 level="critical",
                 ticker=c.ticker,
+                # 4-5 stars -> 60-75, plus up to 25 for the size of the technology shift
+                score=c.stars * 15 + (s.ipc_shift or 0) * 25,
                 title=f"{c.name}: new patent area ({c.stars}★)",
                 message=(
                     f"New IPC classes: {new}. Tech shift {_pct(s.ipc_shift)}, office shift {_pct(s.office_shift)} "
@@ -98,6 +103,7 @@ def deep_alerts(deep) -> list[Alert]:
                 key=f"deep:{c.ticker}:{t.move_type}",
                 level="critical",
                 ticker=c.ticker,
+                score=c.alpha_score,
                 title=f"{c.name}: {t.move_type.replace('_', ' ').lower()} - conviction {t.conviction}/5",
                 message=(
                     f"Alpha Score {c.alpha_score:.0f}, not priced in. {_first_sentence(t.hypothesis)} "
@@ -159,8 +165,9 @@ def _link(ticker: str | None) -> str:
     return f"{base}?tab=alpha" + (f"&focus={quote(ticker)}" if ticker else "")
 
 
-_PRIORITY = {"critical": 5, "notable": 3, "digest": 2, "test": 3}
-_TAGS = {"critical": ["rotating_light"], "notable": ["chart_with_upwards_trend"], "digest": ["memo"], "test": ["white_check_mark"]}
+_PRIORITY = {"critical": 5, "notable": 3, "digest": 2, "summary": 3, "test": 3}
+_TAGS = {"critical": ["rotating_light"], "notable": ["chart_with_upwards_trend"], "digest": ["memo"],
+         "summary": ["clipboard"], "test": ["white_check_mark"]}
 
 
 def send(title: str, message: str, level: str, ticker: str | None = None) -> None:
@@ -237,10 +244,57 @@ def dispatch(alerts: list[Alert]) -> list[Alert]:
 
 def notify_stars(scan) -> list[Alert]:
     try:
-        return dispatch(stars_alerts(scan))
+        sent = dispatch(stars_alerts(scan))
     except Exception:
         logger.exception("Stars alert evaluation failed")
-        return []
+        sent = []
+    if getattr(scan, "trigger", None) == "scheduled":
+        send_critical_summary(scan, new_keys={a.key for a in sent})
+    return sent
+
+
+# ---------------------------------------------------------------------------
+# Daily summary: all current critical signals, even ones already sent
+# ---------------------------------------------------------------------------
+
+_SUMMARY_MAX = 10
+
+
+def critical_signals(scan, deep) -> list[Alert]:
+    """Current critical signals from a Stars scan and a deep analysis, most critical first."""
+    alerts = (stars_alerts(scan) if scan else []) + (deep_alerts(deep) if deep else [])
+    unique = {a.key: a for a in alerts if a.level == "critical"}
+    return sorted(unique.values(), key=lambda a: a.score, reverse=True)
+
+
+def critical_summary(scan, deep, new_keys: set[str] | frozenset[str] = frozenset()) -> tuple[str, str]:
+    crit = critical_signals(scan, deep)
+    if not crit:
+        return "Daily scan: no critical signals", "The scan ran fine; nothing meets the critical rules today."
+    top = crit[:_SUMMARY_MAX]
+    lines = [
+        f"{i}. {'🆕 ' if a.key in new_keys else ''}{a.title} [{a.score:.0f}]"
+        for i, a in enumerate(top, 1)
+    ]
+    more = f"\n+{len(crit) - len(top)} more in the app" if len(crit) > len(top) else ""
+    shown = f"top {len(top)} of {len(crit)}" if len(crit) > len(top) else str(len(crit))
+    return f"Daily critical signals ({shown})", "\n".join(lines) + more
+
+
+def send_critical_summary(scan, new_keys: set[str] | frozenset[str] = frozenset()) -> bool:
+    """Send the daily summary of current critical signals, ignoring the sent-once state. Never raises."""
+    if not is_configured():
+        logger.warning("NTFY_TOPIC not set - skipping daily critical summary")
+        return False
+    try:
+        from .alpha import load_latest_deep  # local import: alpha imports this module
+        title, message = critical_summary(scan, load_latest_deep(), new_keys)
+        send(title, message, "summary")
+    except Exception:
+        logger.exception("Daily critical summary failed")
+        return False
+    logger.info("Sent daily critical summary: %s", title)
+    return True
 
 
 def notify_deep(deep) -> list[Alert]:
