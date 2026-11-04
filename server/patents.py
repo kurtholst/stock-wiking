@@ -1028,6 +1028,21 @@ _SHIFT_THRESHOLD = 0.4
 _epo_throttle = {"interval": 1.0, "last": 0.0}
 _epo_throttle_lock = threading.Lock()
 
+# Longest we sleep on one EPO rejection. EPO quota blocks are ~15 min.
+_EPO_MAX_RETRY_WAIT = 16 * 60
+# Set when EPO keeps rejecting on quota: skip EPO until then so a scan finishes
+# (with partial data) instead of hanging until systemd kills it.
+_epo_blocked_until = 0.0
+
+
+def _retry_after_seconds(value: str) -> float | None:
+    """Parse Retry-After. EPO OPS sends milliseconds (e.g. 899999 = 15 min), not seconds."""
+    try:
+        v = float(value)
+    except ValueError:
+        return None
+    return v / 1000 if v > 3600 else v
+
 
 def _epo_wait() -> None:
     """Space EPO search calls according to the last X-Throttling-Control header."""
@@ -1052,7 +1067,11 @@ def _update_epo_throttle(resp: httpx.Response) -> None:
 
 def _epo_get(params: dict[str, str]) -> httpx.Response | None:
     """GET the EPO biblio search with throttling and retries. None = gave up."""
+    global _epo_blocked_until
+    if time.time() < _epo_blocked_until:
+        return None
     token_refreshed = False
+    quota_waited = False
     for attempt in range(5):
         _epo_wait()
         try:
@@ -1075,8 +1094,14 @@ def _epo_get(params: dict[str, str]) -> httpx.Response | None:
             token_refreshed = True
             continue
         if resp.status_code in (403, 429, 500, 502, 503, 504):
-            retry_after = resp.headers.get("Retry-After", "")
-            delay = float(retry_after) if retry_after.isdigit() else (10, 30, 60, 90, 120)[attempt]
+            retry_after = _retry_after_seconds(resp.headers.get("Retry-After", ""))
+            delay = min(retry_after if retry_after is not None else (10, 30, 60, 90, 120)[attempt], _EPO_MAX_RETRY_WAIT)
+            if "quota" in rejection.lower():
+                if quota_waited:
+                    _epo_blocked_until = time.time() + delay
+                    logger.warning("EPO quota still exhausted - skipping EPO searches for %.0fs", delay)
+                    return None
+                quota_waited = True
             logger.info("EPO %s (%s), retrying in %.0fs", resp.status_code, rejection or "-", delay)
             time.sleep(delay)
             continue

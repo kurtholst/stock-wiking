@@ -3,9 +3,10 @@
 [Unit]
 Description=Stock Wiking - scheduled Stars patent scan
 After=network-online.target
+OnFailure=stock-wiking-failure@%n.service
 
 [Service]
 Type=oneshot
 WorkingDirectory=/home/eyvind/stock-wiking
 ExecStart=/home/eyvind/stock-wiking/.venv/bin/python jobs/run_stars_scan.py --period-days 90
-TimeoutStartSec=30min
+TimeoutStartSec=60min

@@ -1,0 +1,10 @@
+# Sends an ntfy alert when a Stock Wiking job fails or times out.
+# Used via OnFailure=stock-wiking-failure@%n.service in the job units.
+# Install as a user unit: ~/.config/systemd/user/stock-wiking-failure@.service
+[Unit]
+Description=Stock Wiking - ntfy alert for failed %i
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/eyvind/stock-wiking
+ExecStart=/home/eyvind/stock-wiking/.venv/bin/python jobs/notify_failure.py %i

@@ -3,6 +3,7 @@
 [Unit]
 Description=Stock Wiking - scheduled deep alpha analysis
 After=network-online.target
+OnFailure=stock-wiking-failure@%n.service
 
 [Service]
 Type=oneshot
